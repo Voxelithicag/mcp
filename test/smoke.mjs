@@ -60,7 +60,13 @@ try {
 
   const { tools } = await send("tools/list", {});
   const names = tools.map((t) => t.name).sort();
-  check("инструменты перечислены", tools.length === 6, names.join(", "));
+  /* Список закреплён поимённо, а не числом: выпавший инструмент и добавленный
+     в одном изменении дали бы прежнее количество и тест бы промолчал. */
+  const EXPECTED = [
+    "build_swap", "fill_receipt", "get_quote", "health",
+    "list_tokens", "list_venues", "verify_fill",
+  ];
+  check("инструменты перечислены", names.join(",") === EXPECTED.join(","), names.join(", "));
   check("у каждого есть описание", tools.every((t) => (t.description || "").length > 40));
   check("у каждого есть схема входа", tools.every((t) => t.inputSchema));
 

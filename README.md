@@ -29,6 +29,7 @@ if you are running the API yourself.
 | `get_quote` | Best executable quote for a pair |
 | `build_swap` | Unsigned transaction for a route |
 | `verify_fill` | What a transaction actually did |
+| `fill_receipt` | What a fill paid, against what every venue would have paid at that block |
 
 ## It cannot spend your money
 
@@ -65,6 +66,7 @@ get_quote    → 10 USDG buys 0.01306 SPY, six of seven pools could fill
 build_swap   → calldata plus the approval it needs
 (the wallet signs and broadcasts)
 verify_fill  → what settled, read from the receipt
+fill_receipt → and what every other venue would have paid for that size
 ```
 
 ## Development
