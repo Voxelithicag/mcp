@@ -19,15 +19,27 @@ const UA = "voxelithic-mcp";
 
 /** Ответ API отдаём агенту как есть: он структурирован и самодостаточен. */
 async function call(path, { method = "GET", body } = {}) {
-  const res = await fetch(API + path, {
-    method,
-    headers: {
-      accept: "application/json",
-      "user-agent": UA,
-      ...(body ? { "content-type": "application/json" } : {}),
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  let res;
+  try {
+    res = await fetch(API + path, {
+    /* Без срока агент, ждущий ответа, висит столько, сколько решит сеть.
+       Пятнадцати секунд хватает самому тяжёлому запросу — котировке всей
+       доски, — а всё, что дольше, для агента уже бесполезно. */
+      signal: AbortSignal.timeout(15_000),
+      method,
+      headers: {
+        accept: "application/json",
+        "user-agent": UA,
+        ...(body ? { "content-type": "application/json" } : {}),
+      },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch (e) {
+    if (e?.name === "TimeoutError" || e?.name === "AbortError") {
+      throw new Error(`${path} did not answer within 15s. Retry; the request was not sent to the chain.`);
+    }
+    throw new Error(`${path} could not be reached: ${e?.message || e}`);
+  }
 
   const text = await res.text();
   let data;
@@ -45,8 +57,12 @@ async function call(path, { method = "GET", body } = {}) {
   return data;
 }
 
+/* Ответ идёт агенту двумя каналами: структурой и текстом. Текст раньше
+   печатался с отступами, то есть один и тот же payload приезжал дважды и
+   один раз — раздутым. На котировке это 625 токенов вместо 275. Структура
+   остаётся машинным каналом, текст — запасным, но компактным. */
 const ok = (data) => ({
-  content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+  content: [{ type: "text", text: JSON.stringify(data) }],
   structuredContent: data,
 });
 
@@ -63,7 +79,7 @@ const wrap = (fn) => async (args) => {
   }
 };
 
-const server = new McpServer({ name: "voxelithic", version: "0.3.0" });
+const server = new McpServer({ name: "voxelithic", version: "0.5.0" });
 
 /* ─────────────────────────────── справка ─────────────────────────────── */
 
@@ -110,8 +126,14 @@ server.registerTool(
     description:
       "Best executable quote for a pair. Every candidate pool is asked through the " +
       "on-chain quoter rather than modelled, and a pool that cannot take the whole " +
-      "size is excluded instead of estimated. Returns amountOut, minOut and the " +
-      "route, which build_swap takes unchanged.\n\n" +
+      "size is excluded instead of estimated.\n\n" +
+      "On success the numbers sit under `quote`: quote.amountOut, quote.minOut and " +
+      "quote.route, which build_swap takes unchanged. Raw base units are alongside " +
+      "them as amountInRaw, quote.minOutRaw — prefer those when handing values to " +
+      "build_swap, they cannot be misread.\n\n" +
+      "When nothing can fill the whole size the call still succeeds with HTTP 200 and " +
+      "`quote: null` plus a `reason` string. That is a market answer, not a failure: " +
+      "do not retry it, either cut the size or tell the user the pair cannot take it.\n\n" +
       "When the size presses on the price, the answer also carries a split: the same " +
       "order divided across pools of both families, with the legs and how much better " +
       "it is in basis points. To take it, pass that split's legsV3 and legsV4 to " +
@@ -142,8 +164,14 @@ server.registerTool(
     description:
       "Build the unsigned transaction for a route from get_quote. Returns calldata " +
       "and the approval it needs. This server holds no keys and cannot sign or " +
-      "broadcast: hand the transaction to a wallet. minOut is required and is never " +
-      "chosen for you, because that number is the protection against a bad fill.\n\n" +
+      "broadcast: hand the transaction to a wallet or sign it yourself with your own " +
+      "key. minOut is required and is never chosen for you, because that number is " +
+      "the protection against a bad fill; a minOut of zero is refused rather than " +
+      "quietly accepted.\n\n" +
+      "Amounts come in two forms. amountIn and minOut are human units ('10', '10.5'). " +
+      "amountInRaw and minOutRaw are base units, exactly as get_quote returns them — " +
+      "pass those and there is nothing to misread. Send one form or the other; if you " +
+      "send both and they disagree the call is refused.\n\n" +
       "Pass either route, for a single path, or legsV3 together with legsV4 to execute " +
       "a split. A split runs on its own contract and its minOut is checked once against " +
       "the total rather than per leg, so size it against the least liquid pool in the " +
@@ -151,8 +179,10 @@ server.registerTool(
     inputSchema: z.object({
       tokenIn: z.string(),
       tokenOut: z.string(),
-      amountIn: z.string().optional().describe("Same value passed to get_quote. Not needed for a split: the amount is the sum of the legs"),
-      minOut: z.string().describe("Take minOut from the quote, or compute a stricter one"),
+      amountIn: z.string().optional().describe("Human units, the same value passed to get_quote. Not needed for a split: the amount is the sum of the legs"),
+      amountInRaw: z.string().optional().describe("Base units — the amountInRaw field of the quote. Preferred over amountIn"),
+      minOut: z.string().optional().describe("Human units. Take quote.minOut, or compute a stricter floor"),
+      minOutRaw: z.string().optional().describe("Base units — the quote's minOutRaw. Preferred over minOut"),
       route: z
         .array(z.record(z.string(), z.any()))
         .optional()
@@ -200,6 +230,23 @@ server.registerTool(
     }),
   },
   wrap(({ tx }) => call("/receipt?tx=" + encodeURIComponent(tx)))
+);
+
+server.registerTool(
+  "get_burn",
+  {
+    description:
+      "How much $VOXEL the treasury has bought back and burned, and what is still queued. " +
+      "The router takes 0.30% of every swap inside the trade and sends it to the treasury, " +
+      "which can only buy $VOXEL with it and send that to the burn address — it has no " +
+      "withdraw function, for anyone. totalBurned is the treasury's own on-chain counter " +
+      "and only goes up. sinkBalance is larger because the burn address also holds VOXEL " +
+      "burned by other contracts, so the two are not expected to match. The dollar figure " +
+      "is priced at spot on a small size, not at what the whole burned amount would fetch " +
+      "at once, which is why the field is named usdAtSpot.",
+    inputSchema: z.object({}),
+  },
+  wrap(() => call("/burn"))
 );
 
 /* ─────────────────────────────── запуск ──────────────────────────────── */

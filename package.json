@@ -1,7 +1,7 @@
 {
   "name": "voxelithic-mcp",
-  "version": "0.3.0",
-  "description": "MCP server for Voxelithic on Robinhood Chain: quote, route, build unsigned swaps and verify fills",
+  "version": "0.5.0",
+  "description": "MCP server for Voxelithic on Robinhood Chain: quote, route, build unsigned swaps, verify fills and read the buyback",
   "keywords": [
     "mcp",
     "model-context-protocol",

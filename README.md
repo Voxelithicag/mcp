@@ -30,6 +30,7 @@ if you are running the API yourself.
 | `build_swap` | Unsigned transaction for a route |
 | `verify_fill` | What a transaction actually did |
 | `fill_receipt` | What a fill paid, against what every venue would have paid at that block |
+| `get_burn` | How much $VOXEL the treasury has bought back and burned, and what is queued |
 
 ## It cannot spend your money
 
@@ -40,6 +41,42 @@ through a wallet you control before it touches the chain.
 `minOut` is required and never chosen for you. That number is what makes the
 router revert instead of settling short, so picking it on your behalf would mean
 deciding how much loss you find acceptable.
+
+## Signing it yourself
+
+"It cannot sign" is not the same as "a human has to click". The key simply stays
+on your side. An agent that holds one signs and broadcasts without us, and the
+loop is autonomous end to end:
+
+```js
+import { createWalletClient, http, defineChain } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
+
+const rh = defineChain({
+  id: 4663,
+  name: "Robinhood Chain",
+  nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+  rpcUrls: { default: { http: ["https://rpc.mainnet.chain.robinhood.com"] } },
+});
+
+const account = privateKeyToAccount(process.env.AGENT_KEY);
+const wallet = createWalletClient({ account, chain: rh, transport: http() });
+
+// build_swap gave you { transaction, approval }
+await wallet.sendTransaction({                 // the approval, once per spender
+  to: approval.token,
+  data: encodeApprove(approval.spender, approval.amount),
+});
+const hash = await wallet.sendTransaction(transaction);
+```
+
+Then hand the hash back to `verify_fill` to read what actually settled.
+
+Two things worth keeping in the agent's head. The approval only needs sending
+when the current allowance is short — check it before spending a transaction on
+it. And `minOut` travels inside the calldata you sign, so the protection is
+enforced on chain rather than by us behaving: size it per trade and the router
+reverts instead of settling short.
 
 ## Why an agent needs `list_tokens`
 
@@ -76,8 +113,10 @@ npm install
 npm test      # spawns the server and speaks JSON-RPC to it over stdio
 ```
 
-The test does the real handshake, lists the tools and calls each one against the
-live API, so a broken tool fails the run rather than the user.
+The test does the real handshake, lists the tools by name and calls every one of
+them against the live API. It also pins the two things that are easy to break
+quietly: that a large round amount is not misread as base units, and that a
+`minOut` of zero is refused rather than accepted.
 
 ## Related
 
